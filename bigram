@@ -1,0 +1,43 @@
+#! /usr/bin/env python3
+
+import sys
+import itertools
+import collections
+from typing import Dict, Tuple, Sequence, Any
+
+Char = int
+Histogram = Dict[Any, float]
+
+ASCII_RANGE = range(0, 128)
+
+
+def analyze(filename: str) -> Tuple[Histogram, Histogram]:
+    def count_ngrams(items: Sequence[Tuple], keys: Sequence[Tuple]) -> Histogram:
+        raw_histogram = collections.Counter(items)
+        # Additive smoothing for vertical asymptotes at zeros for chi function
+        histogram = {key: raw_histogram[key] + 1 for key in keys}
+        histogram_size = sum(histogram.values())
+        return {key: val / histogram_size for key, val in histogram.items()}
+
+    contents = open(filename, 'rb').read()
+    monogram_freq = count_ngrams(zip(contents), itertools.product(ASCII_RANGE))
+    bigram_freq = count_ngrams(zip(contents[:-1], contents[1:]),
+                               itertools.product(ASCII_RANGE, ASCII_RANGE))
+    return monogram_freq, bigram_freq
+
+
+def dump_analysis(analysis: Histogram) -> None:
+    def get_value(item):
+        key, val = item
+        return val
+
+    for key, val in sorted(analysis.items(), key=get_value, reverse=True):
+        print(f"{repr(bytes(key).decode('ascii')):>16s}: {val:.6f}")
+    print()
+
+
+program, filename = sys.argv
+
+monogram_freq, bigram_freq = analyze(filename)
+dump_analysis(monogram_freq)
+dump_analysis(bigram_freq)
