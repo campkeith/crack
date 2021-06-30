@@ -1,6 +1,7 @@
 #! /usr/bin/env python3
 
 import sys
+import math
 import random
 import itertools
 import collections
@@ -78,33 +79,40 @@ def columnize(string: bytes, size: int) -> str:
 
 
 def find_password(ciphertext: bytes, analysis: Sequence[Histogram],
-                  password_size: int, max_moves: int = 8192) -> Tuple[bytes, float]:
-
+                  password_size: int, num_steps: int = 500000) \
+                  -> Tuple[bytes, float]:
+    """Search the password space for the value with the lowest (best) chi score.
+    Use a simulated annealing algorithm:
+    https://mathworld.wolfram.com/SimulatedAnnealing.html
+    """
     def try_move(index: int, val: int) -> Tuple[float, bytes]:
         new_password = password[:index] + bytes([val]) + password[index + 1:]
-        score = score_solution(decrypt(ciphertext, new_password), analysis)
+        score = score_solution(decrypt(ciphertext, new_password).lower(), analysis)
         return score, new_password
 
-    def find_best_move() -> Tuple[float, bytes]:
-        return min(try_move(index, val) for index in range(password_size)
-                   for val in ASCII_RANGE)
+    def try_random_move() -> Tuple[float, bytes]:
+        return try_move(random.choice(range(password_size)),
+                        random.choice(ASCII_RANGE))
 
-    random.seed(0)
+    random.seed(99)
     password = bytes(random.choice(ASCII_RANGE)
                      for index in range(password_size))
-    score = score_solution(decrypt(ciphertext, password), analysis)
-    for move_count in range(max_moves):
-        new_score, new_password = find_best_move()
-        if password == new_password:
-            break
-        else:
+    score = score_solution(decrypt(ciphertext, password).lower(), analysis)
+    temperature = score
+    for step in range(num_steps, 1, -1):
+        temperature *= 0.99995
+        new_score, new_password = try_random_move()
+        if new_score < score or \
+                math.exp(-(new_score - score) / temperature) > random.random():
             score, password = new_score, new_password
+            if step % 100 == 0:
+                print(f'{format_string(password)}: {score:.3f}')
     return password, score
 
 
 def crack(ciphertext: bytes, analysis: Sequence[Histogram],
           max_password_size: int) -> None:
-    for password_size in range(1, max_password_size + 1):
+    for password_size in range(max_password_size, max_password_size + 1):
         password, score = find_password(ciphertext, analysis, password_size)
         print(f'{format_string(password)}: {score:.3f} ->')
         print(f'{columnize(decrypt(ciphertext, password), password_size)}')
