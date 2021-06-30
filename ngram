@@ -5,11 +5,20 @@ import math
 import random
 import itertools
 import collections
+from dataclasses import dataclass
 from typing import Dict, Tuple, Sequence, Any
 
 Histogram = Dict[bytes, float]
 
 ASCII_RANGE = range(0, 128)
+
+
+@dataclass
+class Histogram:
+    """ngram frequency analysis for a plaintext document."""
+    ngram_size: int
+    counts: Dict[bytes, int] # Counts for each ngram
+    total_count: int # Total number of ngrams
 
 
 def sliding_window(items: Sequence, size: int) -> Sequence:
@@ -18,19 +27,18 @@ def sliding_window(items: Sequence, size: int) -> Sequence:
 
 
 def analyze(filename: str, max_ngram_size: int) -> Sequence[Histogram]:
-    def count_ngrams(ngrams: Sequence[bytes], keys: Sequence[bytes]) -> Histogram:
-        raw_histogram = collections.Counter(ngrams)
+    def analyze_ngrams(ngrams: Sequence[bytes], size: int) -> Histogram:
+        raw_counts = collections.Counter(ngrams)
         # Additive smoothing for vertical asymptotes at zeros for chi function
-        histogram = {key: raw_histogram[key] + 1 for key in keys}
-        histogram_size = sum(histogram.values())
-        return {key: val / histogram_size for key, val in histogram.items()}
+        # Read: count is 1 for any missing ngram in ASCII_RANGE**size
+        counts = collections.defaultdict(lambda: 1,
+                     {key: val + 1 for key, val in raw_counts.items()})
+        total_count = sum(raw_counts.values()) + len(ASCII_RANGE) ** size
+        return Histogram(ngram_size=size, counts=counts,
+                         total_count=total_count)
 
-    def ngram_range(ngram_size: int) -> Sequence[bytes]:
-        return [bytes(ngram) for ngram
-                in itertools.product(*itertools.repeat(ASCII_RANGE, ngram_size))]
-
-    contents = open(filename, 'rb').read()
-    return [count_ngrams(sliding_window(contents, ngram_size), ngram_range(ngram_size))
+    contents = open(filename, 'rb').read().lower()
+    return [analyze_ngrams(sliding_window(contents, ngram_size), ngram_size)
             for ngram_size in range(1, max_ngram_size + 1)]
 
 
@@ -44,20 +52,28 @@ def dump_analysis(analysis: Histogram) -> None:
     print()
 
 
-def chi_score(plaintext: bytes, base_histogram: Histogram, group_size: int) -> float:
-    def expected_freq(val: bytes) -> float:
-        BAD_NGRAM_FREQ = 1e-6
-        return base_histogram.get(val, BAD_NGRAM_FREQ)
+def chi_score(plaintext: bytes, histogram: Histogram) -> float:
+    def chi_term(val: bytes, count: int):
+        """Compute offset to replace term for zero count with nonzero count."""
+        expected_count = histogram.counts[val] \
+                       / histogram.total_count * num_ngrams
+        remove_term = expected_count
+        add_term = (count - expected_count)**2 / expected_count
+        return -remove_term + add_term
 
-    histogram = collections.Counter(sliding_window(plaintext, group_size))
-    num_chars = len(plaintext) - group_size + 1
-    return sum((count / num_chars - expected_freq(val))**2 / expected_freq(val)
-               for val, count in histogram.items())
+    ngrams = sliding_window(plaintext, histogram.ngram_size)
+    counts = collections.Counter(ngrams)
+    num_ngrams = len(plaintext) - histogram.ngram_size + 1
+    chi2 = num_ngrams + sum(chi_term(val, count)
+                            for val, count in counts.items())
+    return math.sqrt(chi2)
 
 
-def score_solution(plaintext: bytes, analysis: Sequence[Histogram]) -> float:
-    return sum(chi_score(plaintext, histogram, index + 1)
-               for index, histogram in enumerate(analysis))
+def score_solution(plaintext: bytes, analysis: Sequence[Histogram],
+                   weights=None) -> float:
+    term_weights = weights or itertools.repeat(1, len(analysis))
+    return sum(weight * chi_score(plaintext, histogram)
+               for weight, histogram in zip(term_weights, analysis))
 
 
 def decrypt(ciphertext: bytes, password: bytes) -> bytes:
@@ -79,7 +95,7 @@ def columnize(string: bytes, size: int) -> str:
 
 
 def find_password(ciphertext: bytes, analysis: Sequence[Histogram],
-                  password_size: int, num_steps: int = 500000) \
+                  password_size: int, num_steps: int = 20000) \
                   -> Tuple[bytes, float]:
     """Search the password space for the value with the lowest (best) chi score.
     Use a simulated annealing algorithm:
@@ -87,20 +103,22 @@ def find_password(ciphertext: bytes, analysis: Sequence[Histogram],
     """
     def try_move(index: int, val: int) -> Tuple[float, bytes]:
         new_password = password[:index] + bytes([val]) + password[index + 1:]
-        score = score_solution(decrypt(ciphertext, new_password).lower(), analysis)
+        score = score_solution(decrypt(ciphertext, new_password).lower(), analysis, score_weights)
         return score, new_password
 
     def try_random_move() -> Tuple[float, bytes]:
         return try_move(random.choice(range(password_size)),
                         random.choice(ASCII_RANGE))
 
-    random.seed(99)
+    random.seed(0)
     password = bytes(random.choice(ASCII_RANGE)
                      for index in range(password_size))
-    score = score_solution(decrypt(ciphertext, password).lower(), analysis)
-    temperature = score
+    junk = decrypt(ciphertext, password).lower()
+    score_weights = [1 / chi_score(junk, histogram) for histogram in analysis]
+    score = len(analysis)
+    temperature = 1
     for step in range(num_steps, 1, -1):
-        temperature *= 0.99995
+        temperature *= 0.999
         new_score, new_password = try_random_move()
         if new_score < score or \
                 math.exp(-(new_score - score) / temperature) > random.random():
