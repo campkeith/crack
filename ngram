@@ -21,6 +21,10 @@ class Histogram:
     total_count: int # Total number of ngrams
 
 
+def average(items: Sequence[float]) -> float:
+    return sum(items) / len(items)
+
+
 def sliding_window(items: Sequence, size: int) -> Sequence:
     return [items[start:end] for start, end
             in zip(range(0, len(items) - size), range(size, len(items)))]
@@ -101,9 +105,24 @@ def find_password(ciphertext: bytes, analysis: Sequence[Histogram],
     Use a simulated annealing algorithm:
     https://mathworld.wolfram.com/SimulatedAnnealing.html
     """
+    def random_password() -> bytes:
+        return bytes(random.choice(ASCII_RANGE)
+                     for index in range(password_size))
+
+    def score_password(password: bytes, weights=None) -> float:
+        plaintext = decrypt(ciphertext, password)
+        return score_solution(plaintext.lower(), analysis, weights=weights)
+
+    def calibrate_initial_temp() -> float:
+        scores = [score_password(random_password(), score_weights)
+                  for index in range(100)]
+        mean = average(scores)
+        stddev = math.sqrt(average([(score - mean)**2 for score in scores]))
+        return stddev
+
     def try_move(index: int, val: int) -> Tuple[float, bytes]:
         new_password = password[:index] + bytes([val]) + password[index + 1:]
-        score = score_solution(decrypt(ciphertext, new_password).lower(), analysis, score_weights)
+        score = score_password(new_password, weights=score_weights)
         return score, new_password
 
     def try_random_move() -> Tuple[float, bytes]:
@@ -111,20 +130,21 @@ def find_password(ciphertext: bytes, analysis: Sequence[Histogram],
                         random.choice(ASCII_RANGE))
 
     random.seed(0)
-    password = bytes(random.choice(ASCII_RANGE)
-                     for index in range(password_size))
-    junk = decrypt(ciphertext, password).lower()
-    score_weights = [1 / chi_score(junk, histogram) for histogram in analysis]
-    score = len(analysis)
-    temperature = 1
-    for step in range(num_steps, 1, -1):
+    password = random_password()
+    plaintext = decrypt(ciphertext, password)
+    score_weights = [1 / chi_score(plaintext, histogram) for histogram in analysis]
+    score = score_password(password, score_weights)
+    last_change_step = 0
+    temperature = calibrate_initial_temp()
+    for step in itertools.count():
         temperature *= 0.999
         new_score, new_password = try_random_move()
-        if new_score < score or \
+        if new_score < score or new_password != password and \
                 math.exp(-(new_score - score) / temperature) > random.random():
             score, password = new_score, new_password
-            if step % 100 == 0:
-                print(f'{format_string(password)}: {score:.3f}')
+            last_change_step = step
+        if step - last_change_step > 10 * len(ASCII_RANGE) * password_size:
+            break
     return password, score
 
 
