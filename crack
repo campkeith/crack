@@ -1,14 +1,13 @@
 #! /usr/bin/env python3
 
-import sys
 import math
 import random
+import argparse
 import itertools
+import statistics
 import collections
 from dataclasses import dataclass
 from typing import Dict, Tuple, Sequence, Any
-
-Histogram = Dict[bytes, float]
 
 ASCII_RANGE = range(0, 128)
 
@@ -21,68 +20,9 @@ class Histogram:
     total_count: int # Total number of ngrams
 
 
-def average(items: Sequence[float]) -> float:
-    return sum(items) / len(items)
-
-
 def sliding_window(items: Sequence, size: int) -> Sequence:
     return [items[start:end] for start, end
-            in zip(range(0, len(items) - size), range(size, len(items)))]
-
-
-def analyze(filename: str, max_ngram_size: int) -> Sequence[Histogram]:
-    def analyze_ngrams(ngrams: Sequence[bytes], size: int) -> Histogram:
-        raw_counts = collections.Counter(ngrams)
-        # Additive smoothing for vertical asymptotes at zeros for chi function
-        # Read: count is 1 for any missing ngram in ASCII_RANGE**size
-        counts = collections.defaultdict(lambda: 1,
-                     {key: val + 1 for key, val in raw_counts.items()})
-        total_count = sum(raw_counts.values()) + len(ASCII_RANGE) ** size
-        return Histogram(ngram_size=size, counts=counts,
-                         total_count=total_count)
-
-    contents = open(filename, 'rb').read().lower()
-    return [analyze_ngrams(sliding_window(contents, ngram_size), ngram_size)
-            for ngram_size in range(1, max_ngram_size + 1)]
-
-
-def dump_analysis(analysis: Histogram) -> None:
-    def get_value(item: Tuple[Any, Any]) -> Any:
-        key, val = item
-        return val
-
-    for key, val in sorted(analysis.items(), key=get_value, reverse=True):
-        print(f"{repr(key.decode('ascii')):>16s}: {val:.6f}")
-    print()
-
-
-def chi_score(plaintext: bytes, histogram: Histogram) -> float:
-    def chi_term(val: bytes, count: int):
-        """Compute offset to replace term for zero count with nonzero count."""
-        expected_count = histogram.counts[val] \
-                       / histogram.total_count * num_ngrams
-        remove_term = expected_count
-        add_term = (count - expected_count)**2 / expected_count
-        return -remove_term + add_term
-
-    ngrams = sliding_window(plaintext, histogram.ngram_size)
-    counts = collections.Counter(ngrams)
-    num_ngrams = len(plaintext) - histogram.ngram_size + 1
-    chi2 = num_ngrams + sum(chi_term(val, count)
-                            for val, count in counts.items())
-    return math.sqrt(chi2)
-
-
-def score_solution(plaintext: bytes, analysis: Sequence[Histogram],
-                   weights=None) -> float:
-    term_weights = weights or itertools.repeat(1, len(analysis))
-    return sum(weight * chi_score(plaintext, histogram)
-               for weight, histogram in zip(term_weights, analysis))
-
-
-def decrypt(ciphertext: bytes, password: bytes) -> bytes:
-    return bytes(cipher_item - pw_item for cipher_item, pw_item
-                 in zip(ciphertext, itertools.cycle(password)))
+            in zip(range(0, len(items) - size + 1), range(size, len(items) + 1))]
 
 
 def format_string(string: bytes) -> str:
@@ -93,14 +33,80 @@ def format_string(string: bytes) -> str:
     return ''.join(format_byte(val) for val in string)
 
 
+def analyze(filename: str, max_ngram_size: int, normalize_case: bool = False) \
+        -> Sequence[Histogram]:
+    def analyze_ngrams(ngrams: Sequence[bytes], size: int) -> Histogram:
+        raw_counts = collections.Counter(ngrams)
+        # Additive smoothing for vertical asymptotes at zeros for chi function
+        # Read: count is 1 for any missing ngram in ASCII_RANGE**size
+        counts = collections.defaultdict(lambda: 1,
+                     {key: val + 1 for key, val in raw_counts.items()})
+        total_count = sum(raw_counts.values()) + len(ASCII_RANGE) ** size
+        return Histogram(ngram_size=size, counts=counts,
+                         total_count=total_count)
+
+    raw_contents = open(filename, 'rb').read()
+    contents = raw_contents.lower() if normalize_case else raw_contents
+    return [analyze_ngrams(sliding_window(contents, ngram_size), ngram_size)
+            for ngram_size in range(1, max_ngram_size + 1)]
+
+
+def dump_analysis(analysis: Histogram) -> None:
+    def get_value(item: Tuple[Any, Any]) -> Any:
+        key, val = item
+        return val
+
+    for key, val in sorted(analysis.counts.items(), key=get_value, reverse=True):
+        print(f"{format_string(key)} : {val}")
+    print()
+
+
+def chi_score(plaintext: bytes, histogram: Histogram) -> float:
+    """Compute chi for the plaintext against the background histogram.
+    Using Pearson's chi-squared test:
+    https://en.wikipedia.org/wiki/Pearson%27s_chi-squared_test
+    One important subtlety is that all possible ngrams have terms,
+    including those not observed in the sample under test.
+    """
+    def chi_offset(val: bytes, count: int):
+        """Compute offset to replace term for zero count with nonzero count."""
+        expected_count = histogram.counts[val] \
+                       / histogram.total_count * num_ngrams
+        remove_term = expected_count # reduces to this if count is 0
+        add_term = (count - expected_count)**2 / expected_count
+        return -remove_term + add_term
+
+    ngrams = sliding_window(plaintext, histogram.ngram_size)
+    counts = collections.Counter(ngrams)
+    # chi**2 for an empty set of observations
+    base_chi2 = num_ngrams = len(plaintext) - histogram.ngram_size + 1
+    chi2 = base_chi2 + sum(chi_offset(val, count)
+                           for val, count in counts.items())
+    return math.sqrt(chi2)
+
+
+def score_solution(plaintext: bytes, analysis: Sequence[Histogram],
+                   weights: Sequence[float]) -> float:
+    return sum(weight * chi_score(plaintext, histogram)
+               for weight, histogram in zip(weights, analysis))
+
+
+def decrypt(ciphertext: bytes, password: bytes,
+            normalize_case: bool = False) -> bytes:
+    plaintext = bytes(cipher_item - pw_item for cipher_item, pw_item
+                      in zip(ciphertext, itertools.cycle(password)))
+    return plaintext.lower() if normalize_case else plaintext
+
+
 def columnize(string: bytes, size: int) -> str:
+    """Columnize decoded plaintext for human cryptanalysis."""
     return '\n'.join(format_string(string[index : index + size])
                      for index in range(0, len(string), size))
 
 
 def find_password(ciphertext: bytes, analysis: Sequence[Histogram],
-                  password_size: int, num_steps: int = 20000) \
-                  -> Tuple[bytes, float]:
+                  password_size: int, temp_half_life: int,
+                  ignore_case: bool, verbose: bool) -> Tuple[bytes, float]:
     """Search the password space for the value with the lowest (best) chi score.
     Use a simulated annealing algorithm:
     https://mathworld.wolfram.com/SimulatedAnnealing.html
@@ -110,15 +116,12 @@ def find_password(ciphertext: bytes, analysis: Sequence[Histogram],
                      for index in range(password_size))
 
     def score_password(password: bytes, weights=None) -> float:
-        plaintext = decrypt(ciphertext, password)
+        plaintext = decrypt(ciphertext, password, normalize_case=ignore_case)
         return score_solution(plaintext.lower(), analysis, weights=weights)
 
     def calibrate_initial_temp() -> float:
-        scores = [score_password(random_password(), score_weights)
-                  for index in range(100)]
-        mean = average(scores)
-        stddev = math.sqrt(average([(score - mean)**2 for score in scores]))
-        return stddev
+        return statistics.stdev(score_password(random_password(), score_weights)
+                                for index in range(100))
 
     def try_move(index: int, val: int) -> Tuple[float, bytes]:
         new_password = password[:index] + bytes([val]) + password[index + 1:]
@@ -129,37 +132,67 @@ def find_password(ciphertext: bytes, analysis: Sequence[Histogram],
         return try_move(random.choice(range(password_size)),
                         random.choice(ASCII_RANGE))
 
-    random.seed(0)
     password = random_password()
-    plaintext = decrypt(ciphertext, password)
+    plaintext = decrypt(ciphertext, password, normalize_case=ignore_case)
+    # Initial score weights are set such that the score is 1 for each ngram size
     score_weights = [1 / chi_score(plaintext, histogram) for histogram in analysis]
     score = score_password(password, score_weights)
     last_change_step = 0
+    # Heat the password to annealing temperature :)
     temperature = calibrate_initial_temp()
+    step_decay = 0.5 ** (1 / temp_half_life)
     for step in itertools.count():
-        temperature *= 0.999
+        # Cool the password slowly...
+        temperature *= step_decay
         new_score, new_password = try_random_move()
         if new_score < score or new_password != password and \
                 math.exp(-(new_score - score) / temperature) > random.random():
             score, password = new_score, new_password
             last_change_step = step
+            if verbose:
+                print(f'{format_string(password)} : {score:.3f}')
+        # Have essentially all possible password mutations been tried?
+        # (Have we essentially quenched the password?)
         if step - last_change_step > 10 * len(ASCII_RANGE) * password_size:
             break
     return password, score
 
 
-def crack(ciphertext: bytes, analysis: Sequence[Histogram],
-          max_password_size: int) -> None:
-    for password_size in range(max_password_size, max_password_size + 1):
-        password, score = find_password(ciphertext, analysis, password_size)
-        print(f'{format_string(password)}: {score:.3f} ->')
-        print(f'{columnize(decrypt(ciphertext, password), password_size)}')
+def print_solution(ciphertext: bytes, password: bytes, score: float) -> None:
+    print(f'{format_string(password)} : {score:.3f} ->')
+    print(f'{columnize(decrypt(ciphertext, password), len(password))}')
 
 
-program, crib_mine_file, max_ngram_size_str, max_password_size_str = sys.argv
-max_ngram_size = int(max_ngram_size_str)
-max_password_size = int(max_password_size_str)
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--max_ngram_size', type=int, default=8,
+                        help='Maximum ngram size (default = 8)')
+    parser.add_argument('--temp_half_life', type=int, default=1000,
+                        help='Steps for each annealing temperature halving (default = 1000)')
+    parser.add_argument('--ignore_case', action='store_true',
+                        help='Consider uppercase and lowercase to be equivalent')
+    parser.add_argument('--verbose', action='store_true',
+                        help='Dump crib stats and each password attempt')
+    parser.add_argument('--seed', type=int, default=0,
+                        help='Random number generator seed (default = 0)')
+    parser.add_argument('--password_size', type=int, required=True,
+                        help='Password size (try a range with multiple invocations)')
+    parser.add_argument('--crib_mine_file', type=str, required=True,
+                        help='Source for the plaintext ngram (crib) database')
+    parser.add_argument('ciphertext_file', type=str,
+                        help='Ciphertext to crack (binary format)')
+    return parser.parse_args()
 
-analysis = analyze(crib_mine_file, max_ngram_size)
-ciphertext = sys.stdin.buffer.read()
-crack(ciphertext, analysis, max_password_size)
+
+args = parse_args()
+random.seed(args.seed)
+analysis = analyze(args.crib_mine_file, args.max_ngram_size,
+                   normalize_case=args.ignore_case)
+if args.verbose:
+    for histogram in analysis:
+        dump_analysis(histogram)
+ciphertext = open(args.ciphertext_file, 'rb').read()
+password, score = find_password(ciphertext, analysis,
+    password_size=args.password_size, temp_half_life=args.temp_half_life,
+    ignore_case=args.ignore_case, verbose=args.verbose)
+print_solution(ciphertext, password, score)
