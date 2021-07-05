@@ -20,13 +20,13 @@ class Histogram:
     total_count: int # Total number of ngrams
 
 
-def sliding_window(items: Sequence, size: int) -> Sequence:
+def sliding_window(items: Sequence, size: int) -> Sequence[Sequence]:
     return [items[start:end] for start, end
             in zip(range(0, len(items) - size + 1), range(size, len(items) + 1))]
 
 
 def format_string(string: bytes) -> str:
-    def format_byte(val: int):
+    def format_byte(val: int) -> str:
         char = chr(val)
         return char if char.isprintable() else '•'
 
@@ -57,22 +57,22 @@ def dump_analysis(analysis: Histogram) -> None:
         return val
 
     for key, val in sorted(analysis.counts.items(), key=get_value, reverse=True):
-        print(f"{format_string(key)} : {val}")
+        print(f'{format_string(key)} : {val}')
     print()
 
 
 def chi_score(plaintext: bytes, histogram: Histogram) -> float:
     """Compute chi for the plaintext against the background histogram.
-    Using Pearson's chi-squared test:
+    Use Pearson's chi-squared test:
     https://en.wikipedia.org/wiki/Pearson%27s_chi-squared_test
-    One important subtlety is that all possible ngrams have terms,
+    An important subtlety is that all possible ngrams have terms,
     including those not observed in the sample under test.
     """
     def chi_offset(val: bytes, count: int):
         """Compute offset to replace term for zero count with nonzero count."""
         expected_count = histogram.counts[val] \
                        / histogram.total_count * num_ngrams
-        remove_term = expected_count # reduces to this if count is 0
+        remove_term = expected_count # Term for count of 0
         add_term = (count - expected_count)**2 / expected_count
         return -remove_term + add_term
 
@@ -115,17 +115,17 @@ def find_password(ciphertext: bytes, analysis: Sequence[Histogram],
         return bytes(random.choice(ASCII_RANGE)
                      for index in range(password_size))
 
-    def score_password(password: bytes, weights=None) -> float:
+    def score_password(password: bytes) -> float:
         plaintext = decrypt(ciphertext, password, normalize_case=ignore_case)
-        return score_solution(plaintext.lower(), analysis, weights=weights)
+        return score_solution(plaintext, analysis, weights=score_weights)
 
     def calibrate_initial_temp() -> float:
-        return statistics.stdev(score_password(random_password(), score_weights)
+        return statistics.stdev(score_password(random_password())
                                 for index in range(100))
 
     def try_move(index: int, val: int) -> Tuple[float, bytes]:
         new_password = password[:index] + bytes([val]) + password[index + 1:]
-        score = score_password(new_password, weights=score_weights)
+        score = score_password(new_password)
         return score, new_password
 
     def try_random_move() -> Tuple[float, bytes]:
@@ -136,7 +136,7 @@ def find_password(ciphertext: bytes, analysis: Sequence[Histogram],
     plaintext = decrypt(ciphertext, password, normalize_case=ignore_case)
     # Initial score weights are set such that the score is 1 for each ngram size
     score_weights = [1 / chi_score(plaintext, histogram) for histogram in analysis]
-    score = score_password(password, score_weights)
+    score = score_password(password)
     last_change_step = 0
     # Heat the password to annealing temperature :)
     temperature = calibrate_initial_temp()
